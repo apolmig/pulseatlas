@@ -13,6 +13,9 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <!-- Overlay backdrop for detail panel -->
+    <div id="overlay" class="overlay"></div>
+
     <div class="app">
       <!-- ── Header ──────────────────────────────────────────────── -->
       <header class="topbar">
@@ -26,6 +29,7 @@
               <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
             </svg>
             <input id="searchInput" type="text" placeholder="Search conflicts, actors, regions..." />
+            <kbd class="search-kbd">/</kbd>
           </div>
           <button id="refreshBtn" class="ghost-btn" title="Refresh live data">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px">
@@ -51,31 +55,44 @@
 
       <!-- ── Stats bar ───────────────────────────────────────────── -->
       <section class="stats-bar">
-        <div class="stat-card">
+        <div class="stat-card anim-card" style="--i:0">
           <span class="stat-label">Active theaters</span>
-          <span class="stat-value" id="statTheaters">0</span>
+          <div class="stat-row">
+            <span class="stat-value" id="statTheaters">0</span>
+            <span class="stat-delta" id="deltaTheaters"></span>
+          </div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card anim-card" style="--i:1">
           <span class="stat-label">High risk</span>
-          <span class="stat-value" id="statHighRisk">0</span>
+          <div class="stat-row">
+            <span class="stat-value" id="statHighRisk">0</span>
+            <span class="stat-delta" id="deltaHighRisk"></span>
+          </div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card anim-card" style="--i:2">
           <span class="stat-label">People displaced</span>
-          <span class="stat-value" id="statDisplaced">0</span>
+          <div class="stat-row">
+            <span class="stat-value" id="statDisplaced">0</span>
+          </div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card anim-card" style="--i:3">
           <span class="stat-label">Est. casualties</span>
-          <span class="stat-value" id="statCasualties">0</span>
+          <div class="stat-row">
+            <span class="stat-value" id="statCasualties">0</span>
+          </div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card anim-card" style="--i:4">
           <span class="stat-label">Composite risk index</span>
-          <span class="stat-value" id="statRiskIndex">0</span>
+          <div class="stat-row">
+            <span class="stat-value" id="statRiskIndex">0</span>
+            <span class="stat-delta" id="deltaRisk"></span>
+          </div>
         </div>
       </section>
 
       <!-- ── Main layout ─────────────────────────────────────────── -->
       <main class="layout">
-        <!-- Left: Filters + Feed -->
+        <!-- Left: Filters + Regional chart + Feed -->
         <aside class="panel">
           <div class="panel-section">
             <h2>Filters</h2>
@@ -98,6 +115,11 @@
                 <span class="range-label" id="timelineLabel">All time</span>
               </label>
             </div>
+          </div>
+
+          <div class="panel-section">
+            <h2>Risk by region</h2>
+            <canvas id="regionChart" height="140"></canvas>
           </div>
 
           <div class="panel-section feed-section">
@@ -125,8 +147,17 @@
 
           <div class="table-card">
             <div class="table-header">
-              <h2>Priority watchlist</h2>
-              <p class="muted">Click any row to inspect. Click column headers to sort.</p>
+              <div>
+                <h2>Priority watchlist</h2>
+                <p class="muted">Click rows to inspect. Headers to sort. <kbd>j</kbd>/<kbd>k</kbd> to navigate.</p>
+              </div>
+              <button id="exportBtn" class="ghost-btn export-btn" title="Export as CSV">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                CSV
+              </button>
             </div>
             <div class="table-scroll">
               <table>
@@ -156,13 +187,15 @@
             <div id="detailStatus"></div>
           </div>
 
-          <div class="detail-gauge-wrap">
-            <div class="detail-gauge" id="detailGauge">
-              <div class="gauge-fill"></div>
-            </div>
-            <div class="detail-risk-label">
-              <span>Risk score</span>
+          <!-- SVG risk arc -->
+          <div class="detail-arc-wrap">
+            <svg id="detailArc" class="risk-arc" viewBox="0 0 120 70" width="120" height="70">
+              <path class="arc-bg" d="M10 65 A50 50 0 0 1 110 65" fill="none" stroke-width="8" stroke-linecap="round"/>
+              <path id="arcFill" class="arc-fill" d="M10 65 A50 50 0 0 1 110 65" fill="none" stroke-width="8" stroke-linecap="round"/>
+            </svg>
+            <div class="arc-label">
               <span class="detail-risk-value" id="detailRisk">0</span>
+              <span class="arc-sub">risk score</span>
             </div>
           </div>
 
@@ -196,6 +229,11 @@
           </div>
         </aside>
       </main>
+
+      <footer class="app-footer">
+        <span>Data: UCDP &middot; ReliefWeb &middot; OCHA</span>
+        <span>Pulse Atlas &mdash; Open-source conflict observatory</span>
+      </footer>
     </div>
 
     <script

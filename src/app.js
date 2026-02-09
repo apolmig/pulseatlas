@@ -331,9 +331,10 @@ let activeFilters = { region: "All", intensity: "All", status: "All", timeline: 
 let selectedConflict = null;
 let sortColumn = "risk";
 let sortAsc = false;
-let liveReports = {};       // ReliefWeb reports mapped by conflict ID
-let allRWReports = [];      // All ReliefWeb reports for the feed
+let liveReports = {};
+let allRWReports = [];
 let dataSources = { ucdp: false, reliefweb: false };
+let highlightedRow = -1;
 
 /* ── DOM refs ────────────────────────────────────────────────────────── */
 
@@ -349,6 +350,7 @@ const watchlistBody = $("watchlist");
 const narrativeFeed = $("narrativeFeed");
 const detailPanel = $("detailPanel");
 const detailClose = $("detailClose");
+const overlay = $("overlay");
 
 /* ── Map setup ───────────────────────────────────────────────────────── */
 
@@ -379,6 +381,12 @@ const statusIcon = (s) => {
   const icons = { Active: "\u25CF", Escalating: "\u25B2", Tense: "\u25C6", Fragile: "\u25CB", Watchlist: "\u25CB" };
   return icons[s] || "\u25CF";
 };
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
 
 /* ── Animated counters ───────────────────────────────────────────────── */
 
@@ -414,7 +422,21 @@ function updateMetrics(items) {
   const riskEl = $("statRiskIndex");
   riskEl.className = "stat-value " + (risk >= 75 ? "risk-high" : risk >= 50 ? "risk-medium" : "risk-low");
 
+  // Delta indicators
+  setDelta("deltaTheaters", active, prevMetrics.active);
+  setDelta("deltaHighRisk", highRisk, prevMetrics.highRisk);
+  setDelta("deltaRisk", risk, prevMetrics.risk);
+
   Object.assign(prevMetrics, { active, highRisk, displaced, casualties, risk });
+}
+
+function setDelta(id, current, previous) {
+  const el = $(id);
+  if (!el || previous === 0) return;
+  const diff = current - previous;
+  if (diff === 0) { el.textContent = ""; return; }
+  el.textContent = (diff > 0 ? "\u25B2 " : "\u25BC ") + Math.abs(diff);
+  el.className = "stat-delta " + (diff > 0 ? "delta-up" : "delta-down");
 }
 
 /* ── Map markers ─────────────────────────────────────────────────────── */
@@ -433,6 +455,14 @@ function createPulseIcon(conflict) {
   });
 }
 
+function buildTooltipContent(c) {
+  const parts = [`<strong>${escapeHtml(c.name)}</strong>`];
+  parts.push(`<span class="tt-row">Risk: <b>${c.risk}</b> &middot; ${c.status}</span>`);
+  if (c.casualties) parts.push(`<span class="tt-row">Casualties: ${fmt(c.casualties)}</span>`);
+  if (c.displaced) parts.push(`<span class="tt-row">Displaced: ${fmt(c.displaced)}</span>`);
+  return `<div class="map-tooltip">${parts.join("")}</div>`;
+}
+
 function updateMarkers(items) {
   markers.forEach((m) => m.remove());
   arcLines.forEach((l) => l.remove());
@@ -442,16 +472,15 @@ function updateMarkers(items) {
   items.forEach((c) => {
     const marker = L.marker(c.coordinates, { icon: createPulseIcon(c) }).addTo(map);
     marker.on("click", () => openDetail(c));
-
-    marker.bindTooltip(
-      `<div class="map-tooltip"><strong>${c.name}</strong><br/>Risk: ${c.risk} &middot; ${c.status}</div>`,
-      { direction: "top", offset: [0, -10], className: "custom-tooltip" }
-    );
-
+    marker.bindTooltip(buildTooltipContent(c), {
+      direction: "top",
+      offset: [0, -10],
+      className: "custom-tooltip",
+    });
     markers.push(marker);
   });
 
-  // Draw connection arcs between related conflicts
+  // Connection arcs
   const itemMap = Object.fromEntries(items.map((c) => [c.id, c]));
   const drawn = new Set();
   items.forEach((c) => {
@@ -493,7 +522,7 @@ function drawSparkline(canvas, data, color) {
   data.forEach((v, i) => {
     const x = i * step;
     const y = h - ((v - min) / (max - min)) * h;
-    i === 0 ? ctx.lineTo(x, y) : ctx.lineTo(x, y);
+    ctx.lineTo(x, y);
   });
   ctx.lineTo(w, h);
   ctx.closePath();
@@ -524,6 +553,83 @@ function drawSparkline(canvas, data, color) {
   ctx.fill();
 }
 
+/* ── Regional risk chart (horizontal bars) ───────────────────────────── */
+
+function drawRegionChart(items) {
+  const canvas = $("regionChart");
+  if (!canvas) return;
+
+  // Aggregate by region
+  const regionMap = {};
+  items.forEach((c) => {
+    if (!regionMap[c.region]) regionMap[c.region] = { risk: 0, count: 0, maxIntensity: "Low" };
+    regionMap[c.region].risk += c.risk;
+    regionMap[c.region].count++;
+    if (c.intensity === "High" || (c.intensity === "Medium" && regionMap[c.region].maxIntensity === "Low")) {
+      regionMap[c.region].maxIntensity = c.intensity;
+    }
+  });
+
+  const regions = Object.entries(regionMap)
+    .map(([name, d]) => ({ name, avgRisk: Math.round(d.risk / d.count), count: d.count, intensity: d.maxIntensity }))
+    .sort((a, b) => b.avgRisk - a.avgRisk);
+
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  ctx.scale(dpr, dpr);
+
+  const barH = 18;
+  const gap = 10;
+  const labelW = 85;
+  const valueW = 36;
+  const barMaxW = w - labelW - valueW - 16;
+
+  regions.forEach((r, i) => {
+    const y = i * (barH + gap) + 8;
+    const color = intensityColor(r.intensity);
+    const barW = (r.avgRisk / 100) * barMaxW;
+
+    // Label
+    ctx.fillStyle = "#7b8da8";
+    ctx.font = "500 11px Inter, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText(r.name, 0, y + barH / 2);
+
+    // Bar background
+    ctx.fillStyle = "rgba(90,128,180,0.1)";
+    ctx.beginPath();
+    ctx.roundRect(labelW, y, barMaxW, barH, 4);
+    ctx.fill();
+
+    // Bar fill
+    const grad = ctx.createLinearGradient(labelW, 0, labelW + barW, 0);
+    grad.addColorStop(0, color + "cc");
+    grad.addColorStop(1, color + "44");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.roundRect(labelW, y, barW, barH, 4);
+    ctx.fill();
+
+    // Value
+    ctx.fillStyle = color;
+    ctx.font = "600 11px Inter, sans-serif";
+    ctx.textAlign = "right";
+    ctx.fillText(r.avgRisk, w - 4, y + barH / 2);
+    ctx.textAlign = "left";
+
+    // Count
+    ctx.fillStyle = "#7b8da880";
+    ctx.font = "400 9px Inter, sans-serif";
+    ctx.fillText(`(${r.count})`, labelW + barW + 6, y + barH / 2);
+  });
+}
+
 /* ── Watchlist table ─────────────────────────────────────────────────── */
 
 function updateWatchlist(items) {
@@ -534,14 +640,18 @@ function updateWatchlist(items) {
       : (b[sortColumn] > a[sortColumn] ? 1 : -1)
   );
 
-  sorted.forEach((c) => {
+  sorted.forEach((c, idx) => {
     const row = document.createElement("tr");
-    row.className = selectedConflict?.id === c.id ? "selected-row" : "";
+    row.className =
+      (selectedConflict?.id === c.id ? "selected-row " : "") +
+      "anim-row";
+    row.style.setProperty("--i", idx);
+    row.dataset.id = c.id;
     row.addEventListener("click", () => openDetail(c));
     row.innerHTML = `
       <td>
-        <div class="wl-name">${c.name}</div>
-        <div class="wl-actors">${c.actors.slice(0, 2).join(", ")}</div>
+        <div class="wl-name">${escapeHtml(c.name)}</div>
+        <div class="wl-actors">${c.actors.slice(0, 2).map(escapeHtml).join(", ")}</div>
       </td>
       <td><span class="badge ${c.intensity.toLowerCase()}">${c.risk}</span></td>
       <td><span class="status-chip ${c.status.toLowerCase().replace(/\s/g, "")}">${statusIcon(c.status)} ${c.status}</span></td>
@@ -581,17 +691,14 @@ document.querySelectorAll("th[data-sort]").forEach((th) => {
 function buildNarrative(items) {
   narrativeFeed.innerHTML = "";
 
-  // Mix static events with live ReliefWeb reports
   const staticEvents = items
     .flatMap((c) => c.events.map((e) => ({
       ...e, conflict: c.name, intensity: c.intensity, id: c.id, source: "static",
     })));
 
-  // Add ReliefWeb reports if available
   const rwEvents = [];
   if (allRWReports.length > 0) {
     for (const report of allRWReports.slice(0, 12)) {
-      // Find matching conflict
       const matchedConflict = items.find((c) => {
         const rwReports = liveReports[c.id] || [];
         return rwReports.some((r) => r.id === report.id);
@@ -613,18 +720,20 @@ function buildNarrative(items) {
     .sort((a, b) => b.date.localeCompare(a.date))
     .slice(0, 10);
 
-  allEvents.forEach((ev) => {
+  allEvents.forEach((ev, idx) => {
     const li = document.createElement("li");
+    li.className = "anim-feed";
+    li.style.setProperty("--i", idx);
     const isLive = ev.source === "reliefweb";
     li.innerHTML = `
       <div class="feed-header">
         <span class="feed-dot" style="background:${intensityColor(ev.intensity)}"></span>
-        <strong>${ev.conflict}</strong>
+        <strong>${escapeHtml(ev.conflict)}</strong>
         ${isLive ? '<span class="feed-live">LIVE</span>' : ""}
         <time>${ev.date}</time>
       </div>
-      <p>${ev.text}</p>
-      ${isLive && ev.rwSource ? `<span class="feed-source">${ev.rwSource}</span>` : ""}
+      <p>${escapeHtml(ev.text)}</p>
+      ${isLive && ev.rwSource ? `<span class="feed-source">${escapeHtml(ev.rwSource)}</span>` : ""}
     `;
     li.addEventListener("click", () => {
       if (isLive && ev.url) {
@@ -638,21 +747,44 @@ function buildNarrative(items) {
   });
 }
 
+/* ── SVG risk arc ────────────────────────────────────────────────────── */
+
+function setArc(risk, color) {
+  const arcFill = $("arcFill");
+  if (!arcFill) return;
+
+  // The arc path total length (semicircle from 10,65 to 110,65 with r=50)
+  const totalLen = arcFill.getTotalLength();
+  const pct = Math.max(0, Math.min(100, risk)) / 100;
+
+  arcFill.style.stroke = color;
+  arcFill.style.strokeDasharray = totalLen;
+  arcFill.style.strokeDashoffset = totalLen * (1 - pct);
+  arcFill.style.filter = `drop-shadow(0 0 6px ${color})`;
+}
+
 /* ── Detail panel ────────────────────────────────────────────────────── */
 
 function openDetail(conflict) {
   selectedConflict = conflict;
   detailPanel.classList.add("open");
   document.body.classList.add("detail-open");
+  overlay.classList.add("active");
 
   const c = conflict;
   $("detailName").textContent = c.name;
   $("detailRegion").textContent = c.region;
   $("detailStatus").innerHTML = `<span class="status-chip ${c.status.toLowerCase().replace(/\s/g, "")}">${statusIcon(c.status)} ${c.status}</span>`;
+
+  // Risk arc
+  const riskColor = intensityColor(c.intensity);
   $("detailRisk").textContent = c.risk;
   $("detailRisk").className = "detail-risk-value " + (c.risk >= 75 ? "risk-high" : c.risk >= 50 ? "risk-medium" : "risk-low");
+  requestAnimationFrame(() => setArc(c.risk, riskColor));
+
   $("detailSummary").textContent = c.summary;
-  // Show UCDP-sourced data if available, with indicator
+
+  // Casualties — prefer UCDP data
   if (c.ucdpDeaths != null && c.ucdpDeaths > 0) {
     $("detailCasualties").innerHTML = fmt(c.ucdpDeaths) + ' <span class="data-src-tag">UCDP</span>';
   } else {
@@ -672,35 +804,27 @@ function openDetail(conflict) {
     actorsList.appendChild(span);
   });
 
-  // Risk gauge
-  const gauge = $("detailGauge");
-  gauge.style.setProperty("--gauge-pct", c.risk + "%");
-  gauge.style.setProperty("--gauge-color", intensityColor(c.intensity));
-
   // Trend chart
   const trendCanvas = $("detailTrend");
   trendCanvas.width = 280;
   trendCanvas.height = 60;
-  requestAnimationFrame(() => drawSparkline(trendCanvas, c.trend, intensityColor(c.intensity)));
+  requestAnimationFrame(() => drawSparkline(trendCanvas, c.trend, riskColor));
 
-  // Event timeline — mix UCDP live events with static events
+  // Event timeline — merge live + static
   const evContainer = $("detailEvents");
   evContainer.innerHTML = "";
 
-  // UCDP events (if any)
   const ucdpEvents = (c.ucdpEvents || []).map((e) => ({
     date: e.date,
-    text: `${e.sideA} vs ${e.sideB} — ${e.deaths} fatalities near ${e.location}`,
+    text: `${e.sideA} vs ${e.sideB} \u2014 ${e.deaths} fatalities near ${e.location}`,
     live: true,
   }));
-  // ReliefWeb reports for this conflict
   const rwEventsForConflict = (liveReports[c.id] || []).slice(0, 3).map((r) => ({
     date: r.date,
     text: r.title,
     live: true,
     url: r.url,
   }));
-  // Static events
   const staticEvents = c.events.map((e) => ({ ...e, live: false }));
 
   const allDetailEvents = [...ucdpEvents, ...rwEventsForConflict, ...staticEvents]
@@ -712,7 +836,7 @@ function openDetail(conflict) {
     div.className = "timeline-event" + (ev.live ? " timeline-live" : "");
     div.innerHTML = `
       <time>${ev.date}${ev.live ? ' <span class="data-src-tag">LIVE</span>' : ""}</time>
-      <p>${ev.text}</p>
+      <p>${escapeHtml(ev.text)}</p>
     `;
     if (ev.url) {
       div.style.cursor = "pointer";
@@ -729,7 +853,7 @@ function openDetail(conflict) {
     if (!rc) return;
     const btn = document.createElement("button");
     btn.className = "related-btn";
-    btn.innerHTML = `${rc.name} <span class="badge ${rc.intensity.toLowerCase()}">${rc.risk}</span>`;
+    btn.innerHTML = `${escapeHtml(rc.name)} <span class="badge ${rc.intensity.toLowerCase()}">${rc.risk}</span>`;
     btn.addEventListener("click", () => openDetail(rc));
     relContainer.appendChild(btn);
   });
@@ -742,11 +866,43 @@ function closeDetail() {
   selectedConflict = null;
   detailPanel.classList.remove("open");
   document.body.classList.remove("detail-open");
+  overlay.classList.remove("active");
   applyFilters();
   map.flyTo([20, 15], 2, { duration: 0.8 });
 }
 
 detailClose.addEventListener("click", closeDetail);
+overlay.addEventListener("click", closeDetail);
+
+/* ── CSV export ──────────────────────────────────────────────────────── */
+
+function exportCSV() {
+  const filtered = getFiltered();
+  const headers = ["Name", "Region", "Risk", "Status", "Intensity", "Casualties", "Displaced", "Months Active", "Updated", "Actors"];
+  const rows = filtered.map((c) => [
+    `"${c.name}"`,
+    c.region,
+    c.risk,
+    c.status,
+    c.intensity,
+    c.casualties,
+    c.displaced,
+    c.monthsActive,
+    c.updated,
+    `"${c.actors.join("; ")}"`,
+  ]);
+  const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `pulse-atlas-export-${new Date().toISOString().split("T")[0]}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+const exportBtn = $("exportBtn");
+if (exportBtn) exportBtn.addEventListener("click", exportCSV);
 
 /* ── Filters ─────────────────────────────────────────────────────────── */
 
@@ -792,14 +948,20 @@ function applyFilters() {
   updateWatchlist(filtered);
   updateMetrics(filtered);
   buildNarrative(filtered);
+  drawRegionChart(filtered);
+  highlightedRow = -1;
 }
 
 /* ── Event listeners ─────────────────────────────────────────────────── */
 
+let searchDebounce;
 [regionFilter, intensityFilter, statusFilter, timelineFilter].forEach((el) =>
   el.addEventListener("input", applyFilters)
 );
-searchInput.addEventListener("input", applyFilters);
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(applyFilters, 150);
+});
 
 resetBtn.addEventListener("click", () => {
   regionFilter.value = "All";
@@ -811,9 +973,52 @@ resetBtn.addEventListener("click", () => {
   applyFilters();
 });
 
-/* Keyboard shortcut: Escape closes detail */
+/* ── Keyboard shortcuts ──────────────────────────────────────────────── */
+
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeDetail();
+  // Escape closes detail
+  if (e.key === "Escape") {
+    if (detailPanel.classList.contains("open")) {
+      closeDetail();
+      return;
+    }
+    if (document.activeElement === searchInput) {
+      searchInput.blur();
+      return;
+    }
+  }
+
+  // "/" focuses search
+  if (e.key === "/" && document.activeElement !== searchInput) {
+    e.preventDefault();
+    searchInput.focus();
+    return;
+  }
+
+  // j/k navigate watchlist rows
+  if (document.activeElement === searchInput) return;
+  const rows = watchlistBody.querySelectorAll("tr");
+  if (rows.length === 0) return;
+
+  if (e.key === "j" || e.key === "ArrowDown") {
+    e.preventDefault();
+    highlightedRow = Math.min(highlightedRow + 1, rows.length - 1);
+    rows.forEach((r) => r.classList.remove("kb-highlight"));
+    rows[highlightedRow].classList.add("kb-highlight");
+    rows[highlightedRow].scrollIntoView({ block: "nearest" });
+  }
+  if (e.key === "k" || e.key === "ArrowUp") {
+    e.preventDefault();
+    highlightedRow = Math.max(highlightedRow - 1, 0);
+    rows.forEach((r) => r.classList.remove("kb-highlight"));
+    rows[highlightedRow].classList.add("kb-highlight");
+    rows[highlightedRow].scrollIntoView({ block: "nearest" });
+  }
+  if (e.key === "Enter" && highlightedRow >= 0 && highlightedRow < rows.length) {
+    const id = rows[highlightedRow].dataset.id;
+    const c = conflicts.find((x) => x.id === id);
+    if (c) openDetail(c);
+  }
 });
 
 /* ── Data source indicator ────────────────────────────────────────────── */
@@ -844,18 +1049,15 @@ async function loadLiveData() {
   try {
     const result = await DataService.fetchAll(conflicts);
 
-    // Update conflicts with enriched data
     for (let i = 0; i < conflicts.length; i++) {
       const enriched = result.conflicts.find((c) => c.id === conflicts[i].id);
       if (enriched) Object.assign(conflicts[i], enriched);
     }
 
-    // Store ReliefWeb reports
     liveReports = result.reports || {};
     allRWReports = result.sources.rwReports || [];
     dataSources = result.sources;
 
-    // Re-render everything with live data
     applyFilters();
     updateDataSourceUI();
   } catch (err) {
@@ -873,12 +1075,9 @@ function setup() {
   buildOptions(statusFilter, [...new Set(conflicts.map((c) => c.status))].sort(), "statuses");
   applyFilters();
   updateDataSourceUI();
-
-  // Load live data in background
   loadLiveData();
 }
 
-// Refresh button
 const refreshBtn = $("refreshBtn");
 if (refreshBtn) {
   refreshBtn.addEventListener("click", () => {
