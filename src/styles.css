@@ -809,6 +809,107 @@ tbody tr.selected-row {
   background: rgba(90, 228, 255, 0.04);
 }
 
+/* ── Data source bar ─────────────────────────────────────────────────── */
+
+.data-source-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 4px;
+}
+
+.data-source-status {
+  font-size: 0.72rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.data-source-status.live { color: #4ade80; }
+.data-source-status.static { color: var(--muted); }
+
+.ds-live,
+.ds-static {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.ds-live { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+.ds-static { background: var(--muted); }
+
+/* Live loader */
+.live-loader {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.72rem;
+  color: var(--accent);
+}
+
+.live-loader.active { display: flex; }
+
+.loader-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Live data tags ──────────────────────────────────────────────────── */
+
+.data-src-tag {
+  display: inline-block;
+  font-size: 0.58rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(74, 222, 128, 0.15);
+  color: #4ade80;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+
+.feed-live {
+  font-size: 0.58rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(74, 222, 128, 0.15);
+  color: #4ade80;
+  animation: live-pulse 2s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.feed-source {
+  display: block;
+  font-size: 0.65rem;
+  color: var(--accent);
+  opacity: 0.7;
+  margin-top: 4px;
+}
+
+.timeline-live time .data-src-tag {
+  font-size: 0.55rem;
+}
+
 /* ── Scrollbars ──────────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }

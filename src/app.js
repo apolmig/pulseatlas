@@ -331,6 +331,9 @@ let activeFilters = { region: "All", intensity: "All", status: "All", timeline: 
 let selectedConflict = null;
 let sortColumn = "risk";
 let sortAsc = false;
+let liveReports = {};       // ReliefWeb reports mapped by conflict ID
+let allRWReports = [];      // All ReliefWeb reports for the feed
+let dataSources = { ucdp: false, reliefweb: false };
 
 /* ── DOM refs ────────────────────────────────────────────────────────── */
 
@@ -577,24 +580,59 @@ document.querySelectorAll("th[data-sort]").forEach((th) => {
 
 function buildNarrative(items) {
   narrativeFeed.innerHTML = "";
-  const allEvents = items
-    .flatMap((c) => c.events.map((e) => ({ ...e, conflict: c.name, intensity: c.intensity, id: c.id })))
+
+  // Mix static events with live ReliefWeb reports
+  const staticEvents = items
+    .flatMap((c) => c.events.map((e) => ({
+      ...e, conflict: c.name, intensity: c.intensity, id: c.id, source: "static",
+    })));
+
+  // Add ReliefWeb reports if available
+  const rwEvents = [];
+  if (allRWReports.length > 0) {
+    for (const report of allRWReports.slice(0, 12)) {
+      // Find matching conflict
+      const matchedConflict = items.find((c) => {
+        const rwReports = liveReports[c.id] || [];
+        return rwReports.some((r) => r.id === report.id);
+      });
+      rwEvents.push({
+        date: report.date,
+        text: report.title,
+        conflict: matchedConflict?.name || report.countries[0] || "Global",
+        intensity: matchedConflict?.intensity || "Medium",
+        id: matchedConflict?.id || null,
+        source: "reliefweb",
+        url: report.url,
+        rwSource: report.source,
+      });
+    }
+  }
+
+  const allEvents = [...rwEvents, ...staticEvents]
     .sort((a, b) => b.date.localeCompare(a.date))
-    .slice(0, 8);
+    .slice(0, 10);
 
   allEvents.forEach((ev) => {
     const li = document.createElement("li");
+    const isLive = ev.source === "reliefweb";
     li.innerHTML = `
       <div class="feed-header">
         <span class="feed-dot" style="background:${intensityColor(ev.intensity)}"></span>
         <strong>${ev.conflict}</strong>
+        ${isLive ? '<span class="feed-live">LIVE</span>' : ""}
         <time>${ev.date}</time>
       </div>
       <p>${ev.text}</p>
+      ${isLive && ev.rwSource ? `<span class="feed-source">${ev.rwSource}</span>` : ""}
     `;
     li.addEventListener("click", () => {
-      const c = conflicts.find((x) => x.id === ev.id);
-      if (c) openDetail(c);
+      if (isLive && ev.url) {
+        window.open(ev.url, "_blank", "noopener");
+      } else if (ev.id) {
+        const c = conflicts.find((x) => x.id === ev.id);
+        if (c) openDetail(c);
+      }
     });
     narrativeFeed.appendChild(li);
   });
@@ -614,7 +652,12 @@ function openDetail(conflict) {
   $("detailRisk").textContent = c.risk;
   $("detailRisk").className = "detail-risk-value " + (c.risk >= 75 ? "risk-high" : c.risk >= 50 ? "risk-medium" : "risk-low");
   $("detailSummary").textContent = c.summary;
-  $("detailCasualties").textContent = c.casualties ? fmt(c.casualties) : "\u2014";
+  // Show UCDP-sourced data if available, with indicator
+  if (c.ucdpDeaths != null && c.ucdpDeaths > 0) {
+    $("detailCasualties").innerHTML = fmt(c.ucdpDeaths) + ' <span class="data-src-tag">UCDP</span>';
+  } else {
+    $("detailCasualties").textContent = c.casualties ? fmt(c.casualties) : "\u2014";
+  }
   $("detailDisplaced").textContent = c.displaced ? fmt(c.displaced) : "\u2014";
   $("detailDuration").textContent = c.monthsActive + " months";
   $("detailUpdated").textContent = c.updated;
@@ -640,13 +683,41 @@ function openDetail(conflict) {
   trendCanvas.height = 60;
   requestAnimationFrame(() => drawSparkline(trendCanvas, c.trend, intensityColor(c.intensity)));
 
-  // Event timeline
+  // Event timeline — mix UCDP live events with static events
   const evContainer = $("detailEvents");
   evContainer.innerHTML = "";
-  c.events.forEach((ev) => {
+
+  // UCDP events (if any)
+  const ucdpEvents = (c.ucdpEvents || []).map((e) => ({
+    date: e.date,
+    text: `${e.sideA} vs ${e.sideB} — ${e.deaths} fatalities near ${e.location}`,
+    live: true,
+  }));
+  // ReliefWeb reports for this conflict
+  const rwEventsForConflict = (liveReports[c.id] || []).slice(0, 3).map((r) => ({
+    date: r.date,
+    text: r.title,
+    live: true,
+    url: r.url,
+  }));
+  // Static events
+  const staticEvents = c.events.map((e) => ({ ...e, live: false }));
+
+  const allDetailEvents = [...ucdpEvents, ...rwEventsForConflict, ...staticEvents]
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 8);
+
+  allDetailEvents.forEach((ev) => {
     const div = document.createElement("div");
-    div.className = "timeline-event";
-    div.innerHTML = `<time>${ev.date}</time><p>${ev.text}</p>`;
+    div.className = "timeline-event" + (ev.live ? " timeline-live" : "");
+    div.innerHTML = `
+      <time>${ev.date}${ev.live ? ' <span class="data-src-tag">LIVE</span>' : ""}</time>
+      <p>${ev.text}</p>
+    `;
+    if (ev.url) {
+      div.style.cursor = "pointer";
+      div.addEventListener("click", () => window.open(ev.url, "_blank", "noopener"));
+    }
     evContainer.appendChild(div);
   });
 
@@ -745,6 +816,55 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeDetail();
 });
 
+/* ── Data source indicator ────────────────────────────────────────────── */
+
+function updateDataSourceUI() {
+  const el = $("dataSourceStatus");
+  if (!el) return;
+
+  const parts = [];
+  if (dataSources.ucdp) parts.push("UCDP (fatalities)");
+  if (dataSources.reliefweb) parts.push("ReliefWeb (reports)");
+
+  if (parts.length > 0) {
+    el.innerHTML = `<span class="ds-live"></span> Live data: ${parts.join(" + ")}`;
+    el.className = "data-source-status live";
+  } else {
+    el.innerHTML = '<span class="ds-static"></span> Static data (APIs unavailable)';
+    el.className = "data-source-status static";
+  }
+}
+
+/* ── Live data loader ────────────────────────────────────────────────── */
+
+async function loadLiveData() {
+  const loader = $("liveLoader");
+  if (loader) loader.classList.add("active");
+
+  try {
+    const result = await DataService.fetchAll(conflicts);
+
+    // Update conflicts with enriched data
+    for (let i = 0; i < conflicts.length; i++) {
+      const enriched = result.conflicts.find((c) => c.id === conflicts[i].id);
+      if (enriched) Object.assign(conflicts[i], enriched);
+    }
+
+    // Store ReliefWeb reports
+    liveReports = result.reports || {};
+    allRWReports = result.sources.rwReports || [];
+    dataSources = result.sources;
+
+    // Re-render everything with live data
+    applyFilters();
+    updateDataSourceUI();
+  } catch (err) {
+    console.warn("Live data load failed:", err.message);
+  } finally {
+    if (loader) loader.classList.remove("active");
+  }
+}
+
 /* ── Init ────────────────────────────────────────────────────────────── */
 
 function setup() {
@@ -752,6 +872,19 @@ function setup() {
   buildOptions(intensityFilter, ["High", "Medium", "Low"], "intensity levels");
   buildOptions(statusFilter, [...new Set(conflicts.map((c) => c.status))].sort(), "statuses");
   applyFilters();
+  updateDataSourceUI();
+
+  // Load live data in background
+  loadLiveData();
+}
+
+// Refresh button
+const refreshBtn = $("refreshBtn");
+if (refreshBtn) {
+  refreshBtn.addEventListener("click", () => {
+    DataService.clearCache();
+    loadLiveData();
+  });
 }
 
 setup();
